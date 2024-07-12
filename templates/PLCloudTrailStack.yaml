@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: A Stackset that deploys in each member account, Event Bus Cross Account Integration with the management account and IAM Role for custom AWS Config rule evaluations to work cross account.
+
+Parameters:
+  CentralEventBusArn:
+    Type: String
+    MinLength: '1'
+    Description: The Central Event Bus ARN which should be called when the event is received.
+  PLConfigLambdaRoleArn:
+    Type: String
+    MinLength: '1'
+    Description:  ARN of the Lambda Function for AWS Config Rule
+  ManagementAccount:
+    Type: String
+    MinLength: '1' 
+    Description: The Management account of your AWS Organizations
+Resources:
+  CrossAccountEventBusRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Description: Role used by Lambda which handles the privatelink notifications
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: CrossAccountEventBusPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: EventBusOperations
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - !Ref CentralEventBusArn
+  PrivateLinkEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - CreateVpcEndpoint
+            - AcceptVpcEndpointConnections
+      Name: PrivateLinkRule
+      State: ENABLED
+      Targets:
+        - Id: Idfd225107-2368-439d-845c-c5c54f481512
+          Arn: !Ref CentralEventBusArn
+          RoleArn: !GetAtt 
+            - CrossAccountEventBusRole
+            - Arn
+  PLGovernanceConfigLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'PLGovernanceConfigLambdaRole'
+      Description: Cross Account Role assumed by Lambda from the management account which handles the privatelink notifications
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Ref PLConfigLambdaRoleArn
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AssumeCrossAccountRolePolicyforConfigLambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ConfigOperations
+                Effect: Allow
+                Action:
+                  - config:PutEvaluations
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetResourceConfigHistory
+                Resource: '*'
+              - Sid: EC2Operations
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVpcEndpointServices
+                  - ec2:DescribeVpcEndpointConnectionNotifications
+                Resource: '*'

@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Solution Stack for Event Driven architecture for Multi-account PrivateLink Governance.
+Parameters:
+  AuditAccountId:
+    Type: String
+    MinLength: '1'
+    Description: AWS Account ID for Centralized Account for receiving CloudTrail events and AWS Config compliance events. for e.g. Audit Account 
+  PLOrganizationUnit:
+    Type: String
+    MinLength: '1'
+    Description: Organization Unit (OU) where the solution should perform preventative and detective control of Privatelink.
+  AdminRoleArn:
+    Type: String
+    MinLength: '1'
+    Description: ARN of the Admin Role with access to update cross account PrivateLink Resources
+  AllowedPrivateLinkPartnerServices: 
+    Type: String
+    MinLength: '1'
+    Description: Comma separated list of "Service Name" of Partner PrivateLink services to whom connections are allowed from your organization. 
+  AWSOrganizationId:
+    Type: String
+    MinLength: '1'
+    Description: AWS Organizations ID for your AWS Organizations in the management account
+  AllowedPrivateLinkAccounts:
+    Type: String
+    MinLength: '1'
+    Description: Comma-Separated List of AWS Account Ids, of accounts which deploy PrivateLink Enabled VPC Endpoint Services. For allowing PrivateLink to AWS resources also add 'amazon'
+  CloudTrailEventNotificationEmail:
+    Type: String
+    MinLength: '1'
+    Description: Email Address of an Admin to receive notifications of CloudTrail Events for PrivateLink resources    
+Resources:
+  PrivateLinkAccessPolicy:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Type: SERVICE_CONTROL_POLICY
+      Name: PreventUnAuthorizedPLAccess
+      TargetIds:
+        - !Ref PLOrganizationUnit
+      Content:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SCPDenyPrivateLink
+            Effect: Deny
+            Action:
+              - 'ec2:CreateVpcEndpoint'
+            Resource: 'arn:aws:ec2:*:*:vpc-endpoint/*'
+            Condition:
+              StringNotEquals:
+                ec2:VpceServiceName: !Split
+                  - ','
+                  - !Ref AllowedPrivateLinkPartnerServices
+                ec2:VpceServiceOwner: !Split
+                  - ','
+                  - !Ref AllowedPrivateLinkAccounts
+  PrivateLinkGovernPolicy:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Type: SERVICE_CONTROL_POLICY
+      Name: PreventPLPrinciplesModify
+      TargetIds:
+        - !Ref PLOrganizationUnit      
+      Content:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SCPPreventPrivateLinkModify
+            Effect: Deny
+            Action:
+              - 'ec2:ModifyVpcEndpointServicePermissions'
+            Resource: 'arn:aws:ec2:*:*:vpc-endpoint/*'
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                - !Ref AdminRoleArn
+  PLAuditStackSet:
+      Type: AWS::CloudFormation::StackSet
+      Properties:
+        StackSetName: 'PLAuditStackSet'
+        ExecutionRoleName: AWSCloudFormationStackSetExecutionRole
+        PermissionModel: SELF_MANAGED
+        Parameters: 
+          - ParameterKey: 'AllowedPrivateLinkPartnerServices' 
+            ParameterValue: !Ref 'AllowedPrivateLinkPartnerServices'
+          - ParameterKey: 'AWSOrganizationId' 
+            ParameterValue: !Ref 'AWSOrganizationId'
+          - ParameterKey: 'CloudTrailEventNotificationEmail' 
+            ParameterValue: !Ref 'CloudTrailEventNotificationEmail'
+        StackInstancesGroup:
+          - Regions:
+              - !Ref 'AWS::Region'
+            DeploymentTargets:
+              Accounts:
+                - !Ref AuditAccountId      
+        Capabilities:
+          - CAPABILITY_NAMED_IAM
+        TemplateURL: 'https://vod-anand78.s3.amazonaws.com/templates/privatelink-governance-audit.yaml'
+  PLCloudTrailEventStackSet:
+      Type: AWS::CloudFormation::StackSet
+      Properties:
+        StackSetName: 'PLCloudTrailEventStackSet'
+        AutoDeployment:
+          Enabled: true
+          RetainStacksOnAccountRemoval: true
+        PermissionModel: SERVICE_MANAGED
+        Parameters: 
+          - ParameterKey: 'CentralEventBusArn' 
+            ParameterValue: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AuditAccountId}:event-bus/default'
+          - ParameterKey: 'ManagementAccount' 
+            ParameterValue: !Ref 'AWS::AccountId'
+          - ParameterKey: 'PLConfigLambdaRoleArn' 
+            ParameterValue: !Sub 'arn:aws:iam::${AuditAccountId}:role/PLConfigLambdaRole'
+        StackInstancesGroup:
+          - Regions:
+              - !Ref 'AWS::Region'
+            DeploymentTargets:
+              OrganizationalUnitIds:
+                - !Ref PLOrganizationUnit      
+        Capabilities:
+          - CAPABILITY_NAMED_IAM
+        TemplateURL: 'https://vod-anand78.s3.amazonaws.com/templates/PLCloudTrailStack.yaml'
+      DependsOn: PLAuditStackSet                                      
